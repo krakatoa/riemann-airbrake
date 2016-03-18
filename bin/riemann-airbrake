@@ -1,0 +1,58 @@
+#!/usr/bin/env ruby
+
+# Riemann agent to collect Airbrake stats
+
+require 'riemann/tools'
+require 'json'
+require 'time'
+require 'net/http'
+
+class Riemann::Tools::Airbrake
+  include Riemann::Tools
+
+  opt :project_id, "Airbrake Project ID",     :default => ''
+  opt :project_name, "Airbrake Project Name", :default => ''
+  opt :user_key, "Airbrake User Key",         :default => ''
+  opt :error_count_warning,   "Error count warning threshold",  :type => Integer, :default => 3000
+  opt :error_count_critical,  "Error count critical threshold", :type => Integer, :default => 5000
+
+  def initialize
+    @uri = URI("https://airbrake.io/api/v4/projects/#{opts.fetch(:project_id)}/groups?key=#{opts.fetch(:user_key)}&environment=production&order=notice_count&limit=50&resolved=false")
+    @error_count_warning  = opts.fetch(:error_count_warning)
+    @error_count_critical = opts.fetch(:error_count_critical)
+    @project_name = opts.fetch(:project_name)
+  end
+
+  def tick
+    result = JSON.parse(Net::HTTP.get(@uri))
+
+    result['groups'].each do |group|
+      metric = group['noticeCount']
+
+      state = if metric >= @error_count_critical
+        'critical'
+      elsif metric >= @error_count_warning
+        'warning'
+      else
+        'ok'
+      end
+
+      if ['warning', 'critical'].include?(state)
+        err = group['errors'].last
+        backtrace = err['backtrace'].last
+
+        msg = {
+          service: "#{@project_name} airbrake #{err['type']}-#{group['id']}",
+          description: err['message'] + '\n' + backtrace['file'] + ':' + backtrace['line'].to_s + '#' + backtrace['function'],
+          timestamp: Time.parse(group['lastNoticeAt']),
+          metric: metric,
+          state: state
+        }
+        report msg
+      end
+
+    end
+  end
+end
+
+Riemann::Tools::Airbrake.run
